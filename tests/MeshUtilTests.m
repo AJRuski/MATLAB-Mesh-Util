@@ -609,6 +609,142 @@ classdef MeshUtilTests < matlab.unittest.TestCase
         end
     end
 
+    %% Rotated meshes
+    % The shape builders make axis-aligned shapes, which can hide bugs that
+    % only show up when faces, edges and cutting planes are oblique to the
+    % axes. These tests repeat key checks after rotating the mesh (and, for
+    % the plane cuts, the plane) by each rotation in the Rotation parameter.
+    % Rotations are proper (no mirroring), so winding order is preserved and
+    % volumes are unchanged; expected centroids are rotated the same way.
+
+    properties (TestParameter)
+        Rotation = MeshUtilTests.MakeRotations();
+    end
+
+    methods (Test)
+        function RotatedShapesKeepVolumeAndCentroid(testCase, Rotation)
+            % Each case: shape, expected volume, expected centroid (unrotated).
+            Height = 2;
+            [BoxFaces, BoxVerts] = MeshUtilTests.MakeBox([1 2 3], [2 3 4]);
+            [CylFaces, CylVerts] = MeshUtilTests.MakeCylinder([1 -2 3], 1.5, 4, 96);
+            [PrismFaces, PrismVerts] = MeshUtilTests.MakeLPrism(Height);
+
+            CylArea = 96 / 2 * 1.5 ^ 2 * sin(2 * pi / 96);
+
+            MeshUtilTests.VerifyRotatedShape(testCase, Rotation, BoxFaces, BoxVerts, ...
+                24, [2 3.5 5], 1e-12, 1e-12);
+            MeshUtilTests.VerifyRotatedShape(testCase, Rotation, CylFaces, CylVerts, ...
+                CylArea * 4, [1 -2 5], 1e-12, 1e-10);
+            MeshUtilTests.VerifyRotatedShape(testCase, Rotation, PrismFaces, PrismVerts, ...
+                3 * Height, [5/6, 5/6, Height / 2], 1e-12, 1e-12);
+        end
+
+        function RotatedSphereKeepsVolumeAndCentroid(testCase, Rotation)
+            Center = [1 -2 3];
+            Radius = 2;
+            [Faces, Verts] = MeshUtilTests.MakeSphere(Center, Radius, 2000);
+
+            % Same loose tolerances as the unrotated sphere test.
+            MeshUtilTests.VerifyRotatedShape(testCase, Rotation, Faces, Verts, ...
+                4 / 3 * pi * Radius ^ 3, Center, 1e-2, 0.01 * Radius);
+        end
+
+        function RotatedFixFaceNormalsRepairsPartlyFlippedBox(testCase, Rotation)
+            [Faces, Verts] = MeshUtilTests.MakeBox([0 0 0], [1 2 3]);
+            Verts = Verts * Rotation';
+            WasFlipped = false(size(Faces, 1), 1);
+            WasFlipped(3:3:end) = true;
+            BadFaces = Faces;
+            BadFaces(WasFlipped, :) = BadFaces(WasFlipped, [1 3 2]);
+
+            [FixedFaces, FixedVerts, FlipMask] = FixFaceNormals(BadFaces, Verts);
+
+            testCase.verifyEqual(FlipMask, WasFlipped);
+            testCase.verifyEqual(ComputeMeshVolume(FixedFaces, FixedVerts), 6, "RelTol", 1e-12);
+        end
+
+        function RotatedSplitBoxWithTiltedPlane(testCase, Rotation)
+            % Same cut as SplitBoxObliqueThroughCenter, rotated as a whole.
+            Corner = [0.5 -1 2];
+            BoxSize = [2 3 4.6];
+            Center = Corner + BoxSize / 2;
+            Normal = [1 1 1];
+            [Faces, Verts] = MeshUtilTests.MakeBox(Corner, BoxSize);
+
+            [FacesPos, VertsPos, FacesNeg, VertsNeg] = SplitMeshByPlane( ...
+                Faces, Verts * Rotation', Normal * Rotation', Center * Rotation');
+
+            HalfVolume = prod(BoxSize) / 2;
+            RotatedCenter = Center * Rotation';
+            RotatedNormal = Normal * Rotation';
+            testCase.assertTrue(IsMeshWatertight(FacesPos, VertsPos));
+            testCase.assertTrue(IsMeshWatertight(FacesNeg, VertsNeg));
+            testCase.verifyEqual(ComputeMeshVolume(FacesPos, VertsPos), HalfVolume, "RelTol", 1e-9);
+            testCase.verifyEqual(ComputeMeshVolume(FacesNeg, VertsNeg), HalfVolume, "RelTol", 1e-9);
+
+            % The halves are point reflections through the center, and the
+            % positive half lies on the side the rotated normal points to.
+            [~, CentroidPos] = ComputeMeshCentroid(FacesPos, VertsPos);
+            [~, CentroidNeg] = ComputeMeshCentroid(FacesNeg, VertsNeg);
+            testCase.verifyEqual((CentroidPos + CentroidNeg) / 2, RotatedCenter, "AbsTol", 1e-9);
+            testCase.verifyGreaterThan(dot(CentroidPos - RotatedCenter, RotatedNormal), 0);
+            testCase.verifyLessThan(dot(CentroidNeg - RotatedCenter, RotatedNormal), 0);
+        end
+
+        function RotatedSplitCylinderAcrossAxis(testCase, Rotation)
+            BaseCenter = [1 -2 3];
+            Radius = 1.5;
+            Height = 4;
+            SegmentCount = 96;
+            [Faces, Verts] = MeshUtilTests.MakeCylinder(BaseCenter, Radius, Height, SegmentCount);
+            PolygonArea = SegmentCount / 2 * Radius ^ 2 * sin(2 * pi / SegmentCount);
+            CutHeight = 0.3 * Height;
+
+            [FacesPos, VertsPos, FacesNeg, VertsNeg] = SplitMeshByPlane( ...
+                Faces, Verts * Rotation', [0 0 1] * Rotation', ...
+                (BaseCenter + [0 0 CutHeight]) * Rotation');
+
+            testCase.VerifyClosedPiece(FacesNeg, VertsNeg, PolygonArea * CutHeight, ...
+                (BaseCenter + [0 0 CutHeight / 2]) * Rotation', 1e-9, 1e-9);
+            testCase.VerifyClosedPiece(FacesPos, VertsPos, PolygonArea * (Height - CutHeight), ...
+                (BaseCenter + [0 0 (CutHeight + Height) / 2]) * Rotation', 1e-9, 1e-9);
+        end
+
+        function RotatedSplitNonConvexPrismIntoSeparatePieces(testCase, Rotation)
+            % Same cut as SplitNonConvexPrismIntoSeparatePieces.
+            Height = 2;
+            [Faces, Verts] = MeshUtilTests.MakeLPrism(Height);
+
+            [FacesPos, VertsPos, FacesNeg, VertsNeg] = SplitMeshByPlane( ...
+                Faces, Verts * Rotation', [1 1 0] * Rotation', [1.25 1.25 0] * Rotation');
+
+            PositiveArea = 0.25;
+            NegativeArea = 3 - PositiveArea;
+            NegativeCentroidXY = (3 * 5/6 - PositiveArea * 4/3) / NegativeArea;
+
+            testCase.VerifyClosedPiece(FacesPos, VertsPos, PositiveArea * Height, ...
+                [4/3, 4/3, Height / 2] * Rotation', 1e-9, 1e-9);
+            testCase.VerifyClosedPiece(FacesNeg, VertsNeg, NegativeArea * Height, ...
+                [NegativeCentroidXY, NegativeCentroidXY, Height / 2] * Rotation', 1e-9, 1e-9);
+        end
+
+        function RotatedSplitSphereMakesHemispheres(testCase, Rotation)
+            Center = [1 -2 3];
+            Radius = 2;
+            Normal = [1 2 -2] / 3;
+            [Faces, Verts] = MeshUtilTests.MakeSphere(Center, Radius, 2000);
+
+            [FacesPos, VertsPos, FacesNeg, VertsNeg] = SplitMeshByPlane( ...
+                Faces, Verts * Rotation', Normal * Rotation', Center * Rotation');
+
+            HemisphereVolume = 2 / 3 * pi * Radius ^ 3;
+            testCase.VerifyClosedPiece(FacesPos, VertsPos, HemisphereVolume, ...
+                (Center + 3 * Radius / 8 * Normal) * Rotation', 3e-2, 0.03 * Radius);
+            testCase.VerifyClosedPiece(FacesNeg, VertsNeg, HemisphereVolume, ...
+                (Center - 3 * Radius / 8 * Normal) * Rotation', 3e-2, 0.03 * Radius);
+        end
+    end
+
     %% VisualizeFaceNormals
 
     methods (Test)
@@ -659,7 +795,38 @@ classdef MeshUtilTests < matlab.unittest.TestCase
         end
     end
 
+    methods (Static, Hidden)
+        function Rotations = MakeRotations()
+            %MAKEROTATIONS Struct of 3x3 proper rotation matrices used as the Rotation test parameter.
+
+            % Each is applied to row-vector points as Verts * R'.
+            Rotations.Identity = eye(3);
+            Rotations.Z90 = MeshUtilTests.AxisAngleToMatrix([0 0 1], 90);
+            Rotations.X37 = MeshUtilTests.AxisAngleToMatrix([1 0 0], 37);
+            Rotations.Y200 = MeshUtilTests.AxisAngleToMatrix([0 1 0], 200);
+            Rotations.Diagonal123 = MeshUtilTests.AxisAngleToMatrix([1 2 3], 123);
+        end
+
+        function R = AxisAngleToMatrix(Axis, AngleDegrees)
+            %AXISANGLETOMATRIX Rotation matrix for a turn of AngleDegrees about Axis (Rodrigues' formula).
+
+            Axis = Axis / norm(Axis);
+            Angle = deg2rad(AngleDegrees);
+            % Cross-product matrix: Skew * v == cross(Axis, v).
+            Skew = [0 -Axis(3) Axis(2); Axis(3) 0 -Axis(1); -Axis(2) Axis(1) 0];
+            R = eye(3) + sin(Angle) * Skew + (1 - cos(Angle)) * (Skew * Skew);
+        end
+    end
+
     methods (Static, Access = private)
+        function VerifyRotatedShape(testCase, Rotation, Faces, Verts, ExpectedVolume, ExpectedCentroid, VolumeRelTol, CentroidAbsTol)
+            %VERIFYROTATEDSHAPE Rotate a mesh, then check it is still a valid closed mesh with the expected volume and rotated centroid.
+
+            RotatedVerts = Verts * Rotation';
+            testCase.VerifyClosedPiece(Faces, RotatedVerts, ExpectedVolume, ...
+                ExpectedCentroid * Rotation', VolumeRelTol, CentroidAbsTol);
+        end
+
         function [Faces, Verts] = MakeBox(Corner, BoxSize)
             %MAKEBOX Axis-aligned box with its minimum corner at Corner. 12 triangles.
 
