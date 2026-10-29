@@ -48,6 +48,12 @@ function [Faces, Verts] = JoinMeshes(FacesList, VertsList, Options)
 %       warning is issued.
 %     - A surface that is exposed on both sides (a loose sheet) is kept as
 %       a sheet, so the result will not be watertight.
+%     - Where three meshes meet at one point, their intersection curves
+%       cross inside a single triangle and retriangulation fails with
+%       JoinMeshes:RetriangulationFailed. Join two meshes at a time instead.
+%     - Identical triangles with opposite winding are treated as a wall
+%       between two solids and both are removed, even if the pair is really
+%       two coincident open sheets.
 %     - Triangles of one mesh are not tested against each other, so a
 %       self-intersecting mesh stays self-intersecting.
 %     - Every triangle is compared with every other, so meshes with
@@ -685,7 +691,11 @@ for Target = ByDescendingX(1:min(50, numel(ByDescendingX)))'
     V = dot(RayDirections, CrossFromEdge1, 2) ./ Determinant;
     T = dot(Edge2, CrossFromEdge1, 2) ./ Determinant;
 
-    IsHit = ~IsParallel & U >= 0 & V >= 0 & (U + V) <= 1 & T > 0;
+    % A little slack is allowed so a ray through a shared edge counts as a
+    % hit on both neighbors even with rounding. The grazing check below then
+    % rejects it, instead of the ray skipping to a farther (interior) triangle.
+    HitSlack = 1e-6;
+    IsHit = ~IsParallel & U >= -HitSlack & V >= -HitSlack & (U + V) <= 1 + HitSlack & T > 0;
     if ~any(IsHit)
         continue
     end
