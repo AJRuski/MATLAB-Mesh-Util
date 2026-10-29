@@ -609,6 +609,199 @@ classdef MeshUtilTests < matlab.unittest.TestCase
         end
     end
 
+    %% JoinMeshes
+
+    methods (Test)
+        function JoinOffsetBoxes(testCase)
+            % Two 2x2x2 boxes overlapping in a 1.5 x 1.25 x 0.75 block. Offsets are
+            % chosen so no vertex or edge of one box lands on a face diagonal of the other.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([0.5 0.75 1.25], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+
+            OverlapSize = [1.5 1.25 0.75];
+            OverlapCenter = [1.25 1.375 1.625];
+            ExpectedVolume = 8 + 8 - prod(OverlapSize);
+            ExpectedCentroid = (8 * [1 1 1] + 8 * [1.5 1.75 2.25] ...
+                - prod(OverlapSize) * OverlapCenter) / ExpectedVolume;
+            testCase.VerifyClosedPiece(Faces, Verts, ExpectedVolume, ExpectedCentroid, 1e-9, 1e-9);
+        end
+
+        function JoinIsNotJustConcatenation(testCase)
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([0.5 0.75 1.25], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+
+            % Corners (2,2,2) of A and (0.5,0.75,1.25) of B are inside the
+            % other box, so they must not survive in the joined skin.
+            testCase.verifyTrue(IsMeshWatertight(Faces, Verts));
+            testCase.verifyFalse(ismember([2 2 2], Verts, "rows"));
+            testCase.verifyFalse(ismember([0.5 0.75 1.25], Verts, "rows"));
+        end
+
+        function JoinBoxesWhoseEdgesPierceFaceDiagonals(testCase)
+            % Boxes shifted by (1,1,1): B's edges pass exactly through the
+            % diagonals of A's faces, a deliberately awkward case.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([1 1 1], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+
+            testCase.VerifyClosedPiece(Faces, Verts, 15, [1.5 1.5 1.5], 1e-9, 1e-9);
+        end
+
+        function JoinCylinderThroughBox(testCase)
+            % A 16-sided prism passes through the middle of a box, sticking out
+            % one unit from the bottom and the top.
+            SegmentCount = 16;
+            Radius = 0.5;
+            CylinderCenterXY = [1.1 0.9];
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeCylinder([CylinderCenterXY, -1], Radius, 4, SegmentCount);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+
+            % Box plus the two one-unit-tall pieces of prism outside it.
+            PolygonArea = SegmentCount / 2 * Radius ^ 2 * sin(2 * pi / SegmentCount);
+            ProtrudingVolume = 2 * PolygonArea;
+            ExpectedVolume = 8 + ProtrudingVolume;
+            ExpectedCentroid = (8 * [1 1 1] + ProtrudingVolume * [CylinderCenterXY, 1]) / ExpectedVolume;
+            testCase.VerifyClosedPiece(Faces, Verts, ExpectedVolume, ExpectedCentroid, 1e-9, 1e-9);
+        end
+
+        function JoinSphereAndBoxIsClosedAndBounded(testCase)
+            % The sphere is a polyhedron, so there is no simple exact answer.
+            % The union must be closed and its volume must lie between the
+            % larger input and the sum of both.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([-1 -1 -1], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeSphere([1 0.1 0.2], 1, 800);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+
+            Volume = ComputeMeshVolume(Faces, Verts);
+            VolumeA = ComputeMeshVolume(FacesA, VertsA);
+            VolumeB = ComputeMeshVolume(FacesB, VertsB);
+            testCase.assertTrue(IsMeshWatertight(Faces, Verts));
+            testCase.verifyGreaterThan(Volume, max(VolumeA, VolumeB));
+            testCase.verifyLessThan(Volume, VolumeA + VolumeB);
+        end
+
+        function JoinIgnoresMeshOrder(testCase)
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeCylinder([1.1 0.9 -1], 0.5, 4, 16);
+
+            [FacesAB, VertsAB] = JoinMeshes({FacesA, FacesB}, {VertsA, VertsB});
+            [FacesBA, VertsBA] = JoinMeshes({FacesB, FacesA}, {VertsB, VertsA});
+
+            testCase.verifyEqual(ComputeMeshVolume(FacesAB, VertsAB), ...
+                ComputeMeshVolume(FacesBA, VertsBA), "RelTol", 1e-9);
+        end
+
+        function JoinThreeBoxesInARow(testCase)
+            % A overlaps B and B overlaps C; A and C do not touch. All offsets
+            % differ so no faces are coplanar.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([1.5 0.3 0.4], [2 2 2]);
+            [FacesC, VertsC] = MeshUtilTests.MakeBox([3 0.1 0.7], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB, FacesC}, {VertsA, VertsB, VertsC});
+
+            OverlapAB = 0.5 * 1.7 * 1.6;
+            OverlapBC = 0.5 * 1.8 * 1.7;
+            testCase.assertTrue(IsMeshWatertight(Faces, Verts));
+            testCase.verifyEqual(ComputeMeshVolume(Faces, Verts), 24 - OverlapAB - OverlapBC, "RelTol", 1e-9);
+        end
+
+        function JoinIgnoresInputWinding(testCase)
+            % The first box is turned inside out; the output is still outward.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([0.5 0.75 1.25], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA(:, [1 3 2]), FacesB}, {VertsA, VertsB});
+
+            OverlapVolume = 1.5 * 1.25 * 0.75;
+            ExpectedVolume = 16 - OverlapVolume;
+            ExpectedCentroid = (8 * [1 1 1] + 8 * [1.5 1.75 2.25] ...
+                - OverlapVolume * [1.25 1.375 1.625]) / ExpectedVolume;
+            testCase.VerifyClosedPiece(Faces, Verts, ExpectedVolume, ExpectedCentroid, 1e-9, 1e-9);
+        end
+
+        function JoinOpenBoxWithSeparateLid(testCase)
+            % Neither mesh is watertight, but together they are a box. The two
+            % meshes only share their boundary vertices; there is no overlap.
+            [BoxFaces, BoxVerts] = MeshUtilTests.MakeBox([0 0 0], [2 3 4]);
+            LidRows = [6 12];                           % the two triangles of the z = max side
+            BodyFaces = BoxFaces(setdiff(1:12, LidRows), :);
+            LidFaces = BoxFaces(LidRows, :);
+            testCase.assertFalse(IsMeshWatertight(BodyFaces, BoxVerts));
+
+            [Faces, Verts] = JoinMeshes({BodyFaces, LidFaces}, {BoxVerts, BoxVerts});
+
+            testCase.VerifyClosedPiece(Faces, Verts, 24, [1 1.5 2], 1e-9, 1e-9);
+        end
+
+        function JoinOpenBoxWithFlippedLid(testCase)
+            [BoxFaces, BoxVerts] = MeshUtilTests.MakeBox([0 0 0], [2 3 4]);
+            LidRows = [6 12];
+            BodyFaces = BoxFaces(setdiff(1:12, LidRows), :);
+            LidFaces = BoxFaces(LidRows, [1 3 2]);      % lid winding reversed
+
+            [Faces, Verts] = JoinMeshes({BodyFaces, LidFaces}, {BoxVerts, BoxVerts});
+
+            testCase.VerifyClosedPiece(Faces, Verts, 24, [1 1.5 2], 1e-9, 1e-9);
+        end
+
+        function JoinOpenPipeThroughBox(testCase)
+            % A square pipe made of four open sides plus two separate end caps
+            % passes through a closed box and sticks out one unit at each end.
+            [BoxFaces, BoxVerts] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            PipeCorner = [0.3 0.65 -1];
+            [PipeFaces, PipeVerts] = MeshUtilTests.MakeBox(PipeCorner, [1 1 4]);
+            SideFaces = PipeFaces([1:4, 7:10], :);      % quads x min, x max, y min, y max
+            BottomCap = PipeFaces([5 11], :);
+            TopCap = PipeFaces([6 12], :);
+
+            [Faces, Verts] = JoinMeshes({BoxFaces, SideFaces, BottomCap, TopCap}, ...
+                {BoxVerts, PipeVerts, PipeVerts, PipeVerts});
+
+            ExpectedVolume = 8 + 2;
+            ExpectedCentroid = (8 * [1 1 1] + 2 * [PipeCorner(1:2) + 0.5, 1]) / ExpectedVolume;
+            testCase.VerifyClosedPiece(Faces, Verts, ExpectedVolume, ExpectedCentroid, 1e-9, 1e-9);
+        end
+
+        function JoinWarnsWhenResultIsNotWatertight(testCase)
+            [BoxFaces, BoxVerts] = MeshUtilTests.MakeBox([0 0 0], [2 3 4]);
+
+            % The lid is missing, so the skin has a hole.
+            testCase.verifyWarning(@() JoinMeshes({BoxFaces([1:5 7:11], :)}, {BoxVerts}), ...
+                "JoinMeshes:ResultNotWatertight");
+        end
+
+        function JoinWarnsAboutSeparatePieces(testCase)
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [1 1 1]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([5 5 5], [1 1 1]);
+
+            testCase.verifyWarning(@() JoinMeshes({FacesA, FacesB}, {VertsA, VertsB}), ...
+                "JoinMeshes:SeparatePieces");
+        end
+
+        function JoinRejectsMismatchedLists(testCase)
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [1 1 1]);
+
+            testCase.verifyError(@() JoinMeshes({FacesA, FacesA}, {VertsA}), ...
+                "JoinMeshes:CountMismatch");
+        end
+
+        function JoinRejectsOutOfRangeIndex(testCase)
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [1 1 1]);
+
+            testCase.verifyError(@() JoinMeshes({FacesA + 100}, {VertsA}), ...
+                "JoinMeshes:InvalidFaceIndex");
+        end
+    end
+
     %% Rotated meshes
     % The shape builders make axis-aligned shapes, which can hide bugs that
     % only show up when faces, edges and cutting planes are oblique to the
@@ -689,6 +882,22 @@ classdef MeshUtilTests < matlab.unittest.TestCase
             testCase.verifyEqual((CentroidPos + CentroidNeg) / 2, RotatedCenter, "AbsTol", 1e-9);
             testCase.verifyGreaterThan(dot(CentroidPos - RotatedCenter, RotatedNormal), 0);
             testCase.verifyLessThan(dot(CentroidNeg - RotatedCenter, RotatedNormal), 0);
+        end
+
+        function RotatedJoinOfOffsetBoxes(testCase, Rotation)
+            % Same join as JoinOffsetBoxes, rotated as a whole so the
+            % intersection curve is oblique to the axes.
+            [FacesA, VertsA] = MeshUtilTests.MakeBox([0 0 0], [2 2 2]);
+            [FacesB, VertsB] = MeshUtilTests.MakeBox([0.5 0.75 1.25], [2 2 2]);
+
+            [Faces, Verts] = JoinMeshes({FacesA, FacesB}, {VertsA * Rotation', VertsB * Rotation'});
+
+            OverlapVolume = 1.5 * 1.25 * 0.75;
+            ExpectedVolume = 16 - OverlapVolume;
+            UnrotatedCentroid = (8 * [1 1 1] + 8 * [1.5 1.75 2.25] ...
+                - OverlapVolume * [1.25 1.375 1.625]) / ExpectedVolume;
+            testCase.VerifyClosedPiece(Faces, Verts, ExpectedVolume, ...
+                UnrotatedCentroid * Rotation', 1e-9, 1e-9);
         end
 
         function RotatedSplitCylinderAcrossAxis(testCase, Rotation)
